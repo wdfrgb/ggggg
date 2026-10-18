@@ -75,7 +75,6 @@ def heartbeat():
   if data and "username" in data:
     username = data["username"].strip().lower()
     
-    # Comprobación estricta de baneo (incluyendo variaciones de mayúsculas/minúsculas)
     if username in usuarios_baneados:
         razon = usuarios_baneados[username]
         return jsonify({"status": "banned", "reason": razon}), 403
