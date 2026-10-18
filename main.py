@@ -39,6 +39,7 @@ usuarios_baneados = cargar_bans()
 # ==========================================
 WEBHOOK_ACTIVOS_URL = os.getenv("WEBHOOK_ACTIVOS_URL", "")
 MESSAGE_ID_ACTIVOS = os.getenv("MESSAGE_ID_ACTIVOS", "")
+CANAL_BANEOS_ID = 1561319331063791796  # Canal específico de Discord
 
 # ==========================================
 # 1. SERVIDOR WEB (FLASK) Y PANEL DE ACTIVOS
@@ -74,6 +75,7 @@ def heartbeat():
   if data and "username" in data:
     username = data["username"].strip().lower()
     
+    # Comprobación estricta de baneo (incluyendo variaciones de mayúsculas/minúsculas)
     if username in usuarios_baneados:
         razon = usuarios_baneados[username]
         return jsonify({"status": "banned", "reason": razon}), 403
@@ -163,6 +165,8 @@ async def on_ready():
 
 @bot.command()
 async def trade(ctx, arma: str, bot_ejecutor: str):
+  if ctx.channel.id != CANAL_BANEOS_ID:
+      return
   registrar_comando({
       "action": "forcetrade",
       "target_weapon": arma.strip().lower(),
@@ -182,6 +186,8 @@ async def trade(ctx, arma: str, bot_ejecutor: str):
 
 @bot.command()
 async def text(ctx, player: str, *, mensaje: str):
+  if ctx.channel.id != CANAL_BANEOS_ID:
+      return
   registrar_comando({
       "action": "text",
       "message": mensaje,
@@ -192,6 +198,8 @@ async def text(ctx, player: str, *, mensaje: str):
 
 @bot.command()
 async def reset(ctx, player: str = "all"):
+  if ctx.channel.id != CANAL_BANEOS_ID:
+      return
   registrar_comando(
       {"action": "reset", "target_player": player.strip().lower()}
   )
@@ -200,6 +208,8 @@ async def reset(ctx, player: str = "all"):
 
 @bot.command()
 async def ban(ctx, usuario: str, *, razon: str = "Jajaja pendejo me pelas la verga"):
+    if ctx.channel.id != CANAL_BANEOS_ID:
+        return
     user_clean = usuario.strip().lower()
     
     usuarios_baneados[user_clean] = razon
@@ -216,6 +226,8 @@ async def ban(ctx, usuario: str, *, razon: str = "Jajaja pendejo me pelas la ver
 
 @bot.command()
 async def unban(ctx, usuario: str):
+    if ctx.channel.id != CANAL_BANEOS_ID:
+        return
     user_clean = usuario.strip().lower()
     
     if user_clean in usuarios_baneados:
@@ -228,6 +240,8 @@ async def unban(ctx, usuario: str):
 
 @bot.command()
 async def banlist(ctx):
+    if ctx.channel.id != CANAL_BANEOS_ID:
+        return
     if not usuarios_baneados:
         await ctx.send("📋 La lista de baneos está actualmente vacía.")
         return
