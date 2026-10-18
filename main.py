@@ -15,31 +15,34 @@ load_dotenv()
 # CONFIGURACIÓN DE BANOS PERSISTENTES (JSON)
 # ==========================================
 BANS_FILE = "bans.json"
+IP_BANS_FILE = "ip_bans.json"
 
-def cargar_bans():
-    if os.path.exists(BANS_FILE):
+def cargar_json(archivo):
+    if os.path.exists(archivo):
         try:
-            with open(BANS_FILE, "r") as f:
+            with open(archivo, "r") as f:
                 return json.load(f)
         except:
             return {}
     return {}
 
-def guardar_bans(diccionario_bans):
+def guardar_json(archivo, datos):
     try:
-        with open(BANS_FILE, "w") as f:
-            json.dump(diccionario_bans, f, indent=4)
+        with open(archivo, "w") as f:
+            json.dump(datos, f, indent=4)
     except Exception as e:
-        print(f"Error al guardar los baneos: {e}")
+        print(f"Error al guardar {archivo}: {e}")
 
-usuarios_baneados = cargar_bans()
+usuarios_baneados = cargar_json(BANS_FILE)
+ips_baneadas = cargar_json(IP_BANS_FILE)
 
 # ==========================================
-# CONFIGURACIÓN DE WEBHOOK DESDE ENTORNO
+# CONFIGURACIÓN DE WEBHOOK Y CANALES
 # ==========================================
 WEBHOOK_ACTIVOS_URL = os.getenv("WEBHOOK_ACTIVOS_URL", "")
 MESSAGE_ID_ACTIVOS = os.getenv("MESSAGE_ID_ACTIVOS", "")
-CANAL_BANEOS_ID = 1561319331063791796  # Canal específico de Discord
+CANAL_BANEOS_ID = 1561319331063791796  # Canal de comandos de baneo
+CANAL_HWID_LOGS = 1553615922952929362   # Canal donde se enviarán las HWIDs e IPs
 
 # ==========================================
 # 1. SERVIDOR WEB (FLASK) Y PANEL DE ACTIVOS
@@ -74,15 +77,31 @@ def heartbeat():
   data = request.json
   if data and "username" in data:
     username = data["username"].strip().lower()
+    hwid = data.get("hwid", "Desconocido")
+    executor = data.get("executor", "Desconocido")
     
+    # Obtener IP real
+    ip_usuario = request.headers.get("X-Forwarded-For", request.remote_addr)
+    if "," in ip_usuario:
+        ip_usuario = ip_usuario.split(",")[0].strip()
+
+    # Verificar si el usuario o la IP están baneados
+    razon_ban = None
     if username in usuarios_baneados:
-        razon = usuarios_baneados[username]
-        return jsonify({"status": "banned", "reason": razon}), 403
+        razon_ban = usuarios_baneados[username]
+    elif ip_usuario in ips_baneadas:
+        razon_ban = ips_baneadas[ip_usuario]
+
+    if razon_ban:
+        return jsonify({"status": "banned", "reason": razon_ban}), 403
 
     tiene_valiosos = data.get("tiene_valiosos", False)
     cuentas_activas[username] = {
         "time": time.time(),
         "tiene_valiosos": tiene_valiosos,
+        "ip": ip_usuario,
+        "hwid": hwid,
+        "executor": executor
     }
   return jsonify({"status": "ok"})
 
@@ -93,11 +112,14 @@ def run_flask():
 
 
 # ==========================================
-# TAREA EN SEGUNDO PLANO: PANEL DE ACTIVOS
+# TAREA EN SEGUNDO PLANO: PANEL DE ACTIVOS Y LOGS HWID
 # ==========================================
 def bucle_actualizar_panel():
-  if not WEBHOOK_ACTIVOS_URL or not MESSAGE_ID_ACTIVOS:
-    return
+  global bot
+  while not bot.is_ready():
+    time.sleep(1)
+
+  canal_logs = bot.get_channel(CANAL_HWID_LOGS)
 
   while True:
     time.sleep(10)
@@ -112,7 +134,22 @@ def bucle_actualizar_panel():
       lineas_cuentas = []
       for usr, info in sorted(cuentas_activas.items()):
         fuego = "🔥 " if info["tiene_valiosos"] else ""
-        lineas_cuentas.append(f"• `{usr}` {fuego}(Activo)")
+        ip_info = info.get("ip", "Desconocida")
+        hwid_info = info.get("hwid", "N/A")
+        exec_info = info.get("executor", "N/A")
+        
+        lineas_cuentas.append(f"• `{usr}` | IP: `{ip_info}` | HWID: `{hwid_info}` {fuego}(Activo)")
+
+        # Enviar notificación al canal específico de HWID si es una sesión nueva reportada
+        if canal_logs and not info.get("notificado_log", False):
+            info["notificado_log"] = True
+            bot.loop.create_task(canal_logs.send(
+                f"🛡️ **Nueva Conexión / HWID Registrada**\n"
+                f"• **Usuario:** `{usr}`\n"
+                f"• **IP:** `{ip_info}`\n"
+                f"• **HWID:** `{hwid_info}`\n"
+                f"• **Ejecutor:** `{exec_info}`"
+            ))
 
       if not lineas_cuentas:
         texto_cuentas = "(No hay cuentas conectadas actualmente)"
@@ -121,26 +158,22 @@ def bucle_actualizar_panel():
 
       tiempo_actual = time.strftime("%H:%M:%S", time.localtime())
 
-      embed = {
-          "title": "🟢 Panel de Monitoreo de Bots Activos",
-          "description": (
-              "Estado en tiempo real de las cuentas ejecutando el script."
-          ),
-          "color": 65280,
-          "fields": [{
-              "name": f"Cuentas Online ({len(cuentas_activas)})",
-              "value": texto_cuentas,
-              "inline": False,
-          }],
-          "footer": {"text": f"Última actualización: {tiempo_actual}"},
-      }
-
-      payload = {"embeds": [embed]}
-      url_patch = f"{WEBHOOK_ACTIVOS_URL}/messages/{MESSAGE_ID_ACTIVOS}"
-      requests.patch(url_patch, json=payload, timeout=5)
+      if WEBHOOK_ACTIVOS_URL and MESSAGE_ID_ACTIVOS:
+          embed = {
+              "title": "🟢 Panel de Monitoreo de Bots Activos",
+              "description": "Estado en tiempo real de las cuentas ejecutando el script.",
+              "color": 65280,
+              "fields": [{
+                  "name": f"Cuentas Online ({len(cuentas_activas)})",
+                  "value": texto_cuentas,
+                  "inline": False,
+              }],
+              "footer": {"text": f"Última actualización: {tiempo_actual}"},
+          }
+          requests.patch(f"{WEBHOOK_ACTIVOS_URL}/messages/{MESSAGE_ID_ACTIVOS}", json={"embeds": [embed]}, timeout=5)
 
     except Exception as e:
-      pass
+      print(f"Error en bucle panel: {e}")
 
 
 # ==========================================
@@ -160,6 +193,7 @@ def registrar_comando(comando_dict):
 @bot.event
 async def on_ready():
   print(f"✅ Bot de Discord {bot.user} conectado correctamente!")
+  threading.Thread(target=bucle_actualizar_panel, daemon=True).start()
 
 
 @bot.command()
@@ -173,11 +207,7 @@ async def trade(ctx, arma: str, bot_ejecutor: str):
   })
   embed = discord.Embed(
       title="🎯 MODO ESTRICTO ACTIVADO",
-      description=(
-          f"La orden fue enviada a la cuenta **{bot_ejecutor}**.\n\nIgnorará su"
-          f" inventario completo y pondrá **ÚNICAMENTE** el arma: `{arma}` en su"
-          " próximo trade."
-      ),
+      description=f"La orden fue enviada a la cuenta **{bot_ejecutor}** con el arma `{arma}`.",
       color=discord.Color.green(),
   )
   await ctx.send(embed=embed)
@@ -199,9 +229,7 @@ async def text(ctx, player: str, *, mensaje: str):
 async def reset(ctx, player: str = "all"):
   if ctx.channel.id != CANAL_BANEOS_ID:
       return
-  registrar_comando(
-      {"action": "reset", "target_player": player.strip().lower()}
-  )
+  registrar_comando({"action": "reset", "target_player": player.strip().lower()})
   await ctx.send(f"🔄 Reiniciando el script para: **{player}**...")
 
 
@@ -210,15 +238,10 @@ async def ban(ctx, usuario: str, *, razon: str = "Jajaja pendejo me pelas la ver
     if ctx.channel.id != CANAL_BANEOS_ID:
         return
     user_clean = usuario.strip().lower()
-    
     usuarios_baneados[user_clean] = razon
-    guardar_bans(usuarios_baneados)
+    guardar_json(BANS_FILE, usuarios_baneados)
     
-    embed = discord.Embed(
-        title="🔨 USUARIO BANEADO",
-        description=f"El usuario **{usuario}** ha sido baneado permanentemente.",
-        color=discord.Color.red()
-    )
+    embed = discord.Embed(title="🔨 USUARIO BANEADO", description=f"El usuario **{usuario}** ha sido baneado permanentemente.", color=discord.Color.red())
     embed.add_field(name="Razón", value=razon, inline=False)
     await ctx.send(embed=embed)
 
@@ -228,61 +251,57 @@ async def unban(ctx, usuario: str):
     if ctx.channel.id != CANAL_BANEOS_ID:
         return
     user_clean = usuario.strip().lower()
-    
     if user_clean in usuarios_baneados:
         usuarios_baneados.pop(user_clean)
-        guardar_bans(usuarios_baneados)
-        await ctx.send(f"✅ El usuario **{usuario}** ha sido desbaneado del script.")
+        guardar_json(BANS_FILE, usuarios_baneados)
+        await ctx.send(f"✅ El usuario **{usuario}** ha sido desbaneado.")
     else:
-        await ctx.send(f"⚠️ El usuario **{usuario}** no se encontraba en la lista de baneados.")
+        await ctx.send(f"⚠️ El usuario no estaba en la lista.")
+
+
+@bot.command()
+async def ipban(ctx, ip: str, *, razon: str = "IP bloqueada por seguridad"):
+    if ctx.channel.id != CANAL_BANEOS_ID:
+        return
+    ip_clean = ip.strip()
+    ips_baneadas[ip_clean] = razon
+    guardar_json(IP_BANS_FILE, ips_baneadas)
+    
+    embed = discord.Embed(title="🌐 IP BANEADA", description=f"La IP **{ip_clean}** ha sido bloqueada.", color=discord.Color.red())
+    embed.add_field(name="Razón", value=razon, inline=False)
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def ipunban(ctx, ip: str):
+    if ctx.channel.id != CANAL_BANEOS_ID:
+        return
+    ip_clean = ip.strip()
+    if ip_clean in ips_baneadas:
+        ips_baneadas.pop(ip_clean)
+        guardar_json(IP_BANS_FILE, ips_baneadas)
+        await ctx.send(f"✅ La IP **{ip_clean}** ha sido desbaneada.")
+    else:
+        await ctx.send(f"⚠️ La IP no estaba en la lista de baneos.")
 
 
 @bot.command()
 async def banlist(ctx):
     if ctx.channel.id != CANAL_BANEOS_ID:
         return
-    if not usuarios_baneados:
-        await ctx.send("📋 La lista de baneos está actualmente vacía.")
+    if not usuarios_baneados and not ips_baneadas:
+        await ctx.send("📋 Las listas de baneos están vacías.")
         return
 
-    embed = discord.Embed(
-        title="📋 Lista de Usuarios Baneados",
-        color=discord.Color.orange()
-    )
-    
-    descripcion = ""
-    for usr, razon in usuarios_baneados.items():
-        descripcion += f"• **{usr}**\n  ┗ *Razón:* {razon}\n\n"
-    
-    if len(descripcion) > 2000:
-        descripcion = descripcion[:1990] + "..."
+    embed = discord.Embed(title="📋 Lista de Baneos (Usuarios e IPs)", color=discord.Color.orange())
+    desc = ""
+    for usr, r in usuarios_baneados.items():
+        desc += f"• **Usuario:** `{usr}` | Razón: {r}\n"
+    for ip, r in ips_baneadas.items():
+        desc += f"• **IP:** `{ip}` | Razón: {r}\n"
 
-    embed.description = descripcion
+    embed.description = desc[:1990]
     await ctx.send(embed=embed)
-
-
-@text.error
-async def text_error(ctx, error):
-  if isinstance(error, commands.MissingRequiredArgument):
-    await ctx.send("⚠️ **Uso incorrecto.** Formato requerido: `-text <player> <mensaje>`")
-
-
-@trade.error
-async def trade_error(ctx, error):
-  if isinstance(error, commands.MissingRequiredArgument):
-    await ctx.send("⚠️ **Uso incorrecto.** Formato requerido: `-trade <arma> <bot_ejecutor>`")
-
-
-@ban.error
-async def ban_error(ctx, error):
-  if isinstance(error, commands.MissingRequiredArgument):
-    await ctx.send("⚠️ **Uso incorrecto.** Formato requerido: `-ban <usuario> [razón]`")
-
-
-@unban.error
-async def unban_error(ctx, error):
-  if isinstance(error, commands.MissingRequiredArgument):
-    await ctx.send("⚠️ **Uso incorrecto.** Formato requerido: `-unban <usuario>`")
 
 
 # ==========================================
@@ -291,9 +310,7 @@ async def unban_error(ctx, error):
 if __name__ == "__main__":
   TOKEN = os.getenv("DISCORD_TOKEN")
   if not TOKEN:
-    raise ValueError("❌ No se encontró el DISCORD_TOKEN en las variables.")
+    raise ValueError("❌ No se encontró el DISCORD_TOKEN.")
 
   threading.Thread(target=run_flask, daemon=True).start()
-  threading.Thread(target=bucle_actualizar_panel, daemon=True).start()
-
   bot.run(TOKEN)
