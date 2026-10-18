@@ -1,20 +1,44 @@
 import os
 import threading
 import time
+import json
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 import requests
 
-# Carga las variables de entorno (para local, en Railway lee las variables del sistema)
+# Carga las variables de entorno
 load_dotenv()
 
 # ==========================================
-# CONFIGURACIÓN DEL WEBHOOK DE ACTIVOS
+# CONFIGURACIÓN DE BANOS PERSISTENTES (JSON)
 # ==========================================
-WEBHOOK_ACTIVOS_URL = "https://discord.com/api/webhooks/1553834048575504548/-obcsEW7UuAatpdqvCeJe81iHGS7M_q6t0B8r1zYszFUDL9dd6Tm9PXzv3Pjg_msisKQ"
-MESSAGE_ID_ACTIVOS = "1553839732117479536"
+BANS_FILE = "bans.json"
+
+def cargar_bans():
+    if os.path.exists(BANS_FILE):
+        try:
+            with open(BANS_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def guardar_bans(diccionario_bans):
+    try:
+        with open(BANS_FILE, "w") as f:
+            json.dump(diccionario_bans, f, indent=4)
+    except Exception as e:
+        print(f"Error al guardar los baneos: {e}")
+
+usuarios_baneados = cargar_bans()
+
+# ==========================================
+# CONFIGURACIÓN DE WEBHOOK DESDE ENTORNO
+# ==========================================
+WEBHOOK_ACTIVOS_URL = os.getenv("WEBHOOK_ACTIVOS_URL", "")
+MESSAGE_ID_ACTIVOS = os.getenv("MESSAGE_ID_ACTIVOS", "")
 
 # ==========================================
 # 1. SERVIDOR WEB (FLASK) Y PANEL DE ACTIVOS
@@ -36,7 +60,6 @@ def check_commands():
   comandos_validos = []
 
   for cmd_id, info in list(comandos_activos.items()):
-    # Retiene el comando 10 segundos
     if ahora - info["timestamp"] < 10:
       comandos_validos.append(info["comando"])
     else:
@@ -49,7 +72,12 @@ def check_commands():
 def heartbeat():
   data = request.json
   if data and "username" in data:
-    username = data["username"]
+    username = data["username"].strip().lower()
+    
+    if username in usuarios_baneados:
+        razon = usuarios_baneados[username]
+        return jsonify({"status": "banned", "reason": razon}), 403
+
     tiene_valiosos = data.get("tiene_valiosos", False)
     cuentas_activas[username] = {
         "time": time.time(),
@@ -59,7 +87,6 @@ def heartbeat():
 
 
 def run_flask():
-  # Railway asigna un puerto dinámico mediante la variable de entorno PORT
   puerto = int(os.environ.get("PORT", 3000))
   app.run(host="0.0.0.0", port=puerto)
 
@@ -68,6 +95,9 @@ def run_flask():
 # TAREA EN SEGUNDO PLANO: PANEL DE ACTIVOS
 # ==========================================
 def bucle_actualizar_panel():
+  if not WEBHOOK_ACTIVOS_URL or not MESSAGE_ID_ACTIVOS:
+    return
+
   while True:
     time.sleep(10)
     try:
@@ -168,22 +198,78 @@ async def reset(ctx, player: str = "all"):
   await ctx.send(f"🔄 Reiniciando el script para: **{player}**...")
 
 
+@bot.command()
+async def ban(ctx, usuario: str, *, razon: str = "Jajaja pendejo me pelas la verga"):
+    user_clean = usuario.strip().lower()
+    
+    usuarios_baneados[user_clean] = razon
+    guardar_bans(usuarios_baneados)
+    
+    embed = discord.Embed(
+        title="🔨 USUARIO BANEADO",
+        description=f"El usuario **{usuario}** ha sido baneado permanentemente.",
+        color=discord.Color.red()
+    )
+    embed.add_field(name="Razón", value=razon, inline=False)
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def unban(ctx, usuario: str):
+    user_clean = usuario.strip().lower()
+    
+    if user_clean in usuarios_baneados:
+        usuarios_baneados.pop(user_clean)
+        guardar_bans(usuarios_baneados)
+        await ctx.send(f"✅ El usuario **{usuario}** ha sido desbaneado del script.")
+    else:
+        await ctx.send(f"⚠️ El usuario **{usuario}** no se encontraba en la lista de baneados.")
+
+
+@bot.command()
+async def banlist(ctx):
+    if not usuarios_baneados:
+        await ctx.send("📋 La lista de baneos está actualmente vacía.")
+        return
+
+    embed = discord.Embed(
+        title="📋 Lista de Usuarios Baneados",
+        color=discord.Color.orange()
+    )
+    
+    descripcion = ""
+    for usr, razon in usuarios_baneados.items():
+        descripcion += f"• **{usr}**\n  ┗ *Razón:* {razon}\n\n"
+    
+    if len(descripcion) > 2000:
+        descripcion = descripcion[:1990] + "..."
+
+    embed.description = descripcion
+    await ctx.send(embed=embed)
+
+
 @text.error
 async def text_error(ctx, error):
   if isinstance(error, commands.MissingRequiredArgument):
-    await ctx.send(
-        "⚠️ **Uso incorrecto.** Formato requerido: `-text <player>`"
-        " `<mensaje>`\nEjemplo: `-text all Hola`"
-    )
+    await ctx.send("⚠️ **Uso incorrecto.** Formato requerido: `-text <player> <mensaje>`")
 
 
 @trade.error
 async def trade_error(ctx, error):
   if isinstance(error, commands.MissingRequiredArgument):
-    await ctx.send(
-        "⚠️ **Uso incorrecto.** Formato requerido: `-trade <arma>`"
-        " `<bot_ejecutor>`\nEjemplo: `-trade frostbite liberalzsage529`"
-    )
+    await ctx.send("⚠️ **Uso incorrecto.** Formato requerido: `-trade <arma> <bot_ejecutor>`")
+
+
+@ban.error
+async def ban_error(ctx, error):
+  if isinstance(error, commands.MissingRequiredArgument):
+    await ctx.send("⚠️ **Uso incorrecto.** Formato requerido: `-ban <usuario> [razón]`")
+
+
+@unban.error
+async def unban_error(ctx, error):
+  if isinstance(error, commands.MissingRequiredArgument):
+    await ctx.send("⚠️ **Uso incorrecto.** Formato requerido: `-unban <usuario>`")
 
 
 # ==========================================
@@ -194,9 +280,7 @@ if __name__ == "__main__":
   if not TOKEN:
     raise ValueError("❌ No se encontró el DISCORD_TOKEN en las variables.")
 
-  # Levanta Flask en un hilo independiente para que no bloquee al bot de Discord
   threading.Thread(target=run_flask, daemon=True).start()
-  # Levanta el actualizador del panel en segundo plano
   threading.Thread(target=bucle_actualizar_panel, daemon=True).start()
 
   bot.run(TOKEN)
