@@ -51,7 +51,7 @@ cuentas_activas = {}
 
 @app.route("/")
 def home():
-  return "El servidor de RysHub (MM2) está activo y en línea."
+  return "Miguelito runs u."
 
 
 @app.route("/check", methods=["GET"])
