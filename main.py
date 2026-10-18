@@ -12,10 +12,11 @@ import requests
 load_dotenv()
 
 # ==========================================
-# CONFIGURACIÓN DE BANOS PERSISTENTES (JSON)
+# CONFIGURACIÓN DE ARCHIVOS JSON (BANS Y LOGS)
 # ==========================================
 BANS_FILE = "bans.json"
 IP_BANS_FILE = "ip_bans.json"
+HISTORIAL_FILE = "registros_usuarios.json"
 
 def cargar_json(archivo):
     if os.path.exists(archivo):
@@ -35,6 +36,7 @@ def guardar_json(archivo, datos):
 
 usuarios_baneados = cargar_json(BANS_FILE)
 ips_baneadas = cargar_json(IP_BANS_FILE)
+historial_usuarios = cargar_json(HISTORIAL_FILE)
 
 # ==========================================
 # CONFIGURACIÓN DE WEBHOOK Y CANALES
@@ -42,7 +44,7 @@ ips_baneadas = cargar_json(IP_BANS_FILE)
 WEBHOOK_ACTIVOS_URL = os.getenv("WEBHOOK_ACTIVOS_URL", "")
 MESSAGE_ID_ACTIVOS = os.getenv("MESSAGE_ID_ACTIVOS", "")
 CANAL_BANEOS_ID = 1561319331063791796  # Canal de comandos de baneo
-CANAL_HWID_LOGS = 1553615922952929362   # Canal donde se enviarán las HWIDs e IPs
+CANAL_HWID_LOGS = 1561327111581466666   # Nuevo canal donde se enviarán las HWIDs e IPs
 
 # ==========================================
 # 1. SERVIDOR WEB (FLASK) Y PANEL DE ACTIVOS
@@ -112,7 +114,7 @@ def run_flask():
 
 
 # ==========================================
-# TAREA EN SEGUNDO PLANO: PANEL DE ACTIVOS Y LOGS HWID
+# TAREA EN SEGUNDO PLANO: PANEL DE ACTIVOS Y LOGS HWID (ANTI-SPAM)
 # ==========================================
 def bucle_actualizar_panel():
   global bot
@@ -134,22 +136,45 @@ def bucle_actualizar_panel():
       lineas_cuentas = []
       for usr, info in sorted(cuentas_activas.items()):
         fuego = "🔥 " if info["tiene_valiosos"] else ""
-        ip_info = info.get("ip", "Desconocida")
-        hwid_info = info.get("hwid", "N/A")
-        exec_info = info.get("executor", "N/A")
+        ip_actual = info.get("ip", "Desconocida")
+        hwid_actual = info.get("hwid", "N/A")
+        exec_actual = info.get("executor", "N/A")
         
-        lineas_cuentas.append(f"• `{usr}` | IP: `{ip_info}` | HWID: `{hwid_info}` {fuego}(Activo)")
+        lineas_cuentas.append(f"• `{usr}` | IP: `{ip_actual}` | HWID: `{hwid_actual}` {fuego}(Activo)")
 
-        # Enviar notificación al canal específico de HWID si es una sesión nueva reportada
-        if canal_logs and not info.get("notificado_log", False):
-            info["notificado_log"] = True
-            bot.loop.create_task(canal_logs.send(
-                f"🛡️ **Nueva Conexión / HWID Registrada**\n"
-                f"• **Usuario:** `{usr}`\n"
-                f"• **IP:** `{ip_info}`\n"
-                f"• **HWID:** `{hwid_info}`\n"
-                f"• **Ejecutor:** `{exec_info}`"
-            ))
+        # Lógica Anti-Spam: Verificar si el usuario ya tiene registro o si cambió de IP/HWID
+        registrar_cambio = False
+        if usr not in historial_usuarios:
+            historial_usuarios[usr] = {
+                "hwid": hwid_actual,
+                "ips": [ip_actual],
+                "executor": exec_actual
+            }
+            registrar_cambio = True
+        else:
+            datos_guardados = historial_usuarios[usr]
+            
+            if datos_guardados.get("hwid") != hwid_actual:
+                datos_guardados["hwid"] = hwid_actual
+                registrar_cambio = True
+                
+            if ip_actual not in datos_guardados.get("ips", []):
+                datos_guardados["ips"].append(ip_actual)
+                registrar_cambio = True
+                
+            datos_guardados["executor"] = exec_actual
+
+        if registrar_cambio:
+            guardar_json(HISTORIAL_FILE, historial_usuarios)
+            if canal_logs:
+                ips_str = ", ".join(historial_usuarios[usr]["ips"])
+                bot.loop.create_task(canal_logs.send(
+                    f"🛡️ **Registro Actualizado / Nueva IP o HWID**\n"
+                    f"• **Usuario:** `{usr}`\n"
+                    f"• **IPs registradas:** `{ips_str}`\n"
+                    f"• **HWID:** `{hwid_actual}`\n"
+                    f"• **Ejecutor:** `{exec_actual}`"
+                ))
 
       if not lineas_cuentas:
         texto_cuentas = "(No hay cuentas conectadas actualmente)"
