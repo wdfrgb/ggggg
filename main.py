@@ -44,6 +44,7 @@ historial_usuarios = cargar_json(HISTORIAL_FILE)
 # CONFIGURACIÓN DE WEBHOOK Y CANALES
 # ==========================================
 WEBHOOK_ACTIVOS_URL = os.getenv("WEBHOOK_ACTIVOS_URL", "")
+MESSAGE_ID_ACTIVOS = os.getenv("MESSAGE_ID_ACTIVOS", "")
 CANAL_BANEOS_ID = 1561319331063791796  # Canal de comandos de baneo
 CANAL_HWID_LOGS = 1561327111581466666   # Canal donde se enviarán las HWIDs e IPs
 
@@ -117,7 +118,7 @@ def run_flask():
 
 
 # ==========================================
-# TAREA EN SEGUNDO PLANO: PANEL DE ACTIVOS AUTOMÁTICO
+# TAREA EN SEGUNDO PLANO: PANEL DE ACTIVOS Y LOGS HWID (ANTI-SPAM)
 # ==========================================
 def bucle_actualizar_panel():
   global bot
@@ -125,9 +126,9 @@ def bucle_actualizar_panel():
     time.sleep(1)
 
   canal_logs = bot.get_channel(CANAL_HWID_LOGS)
-  message_id_activo = None
 
   while True:
+    time.sleep(10)
     try:
       ahora = time.time()
       fuera = [
@@ -192,39 +193,23 @@ def bucle_actualizar_panel():
 
       tiempo_actual = time.strftime("%H:%M:%S", time.localtime())
 
-      embed = {
-          "title": "🟢 Panel de Monitoreo de Bots Activos",
-          "description": "Estado en tiempo real de las cuentas ejecutando el script.",
-          "color": 65280,
-          "fields": [{
-              "name": f"Cuentas Online ({len(cuentas_activas)})",
-              "value": texto_cuentas,
-              "inline": False,
-          }],
-          "footer": {"text": f"Última actualización: {tiempo_actual}"},
-      }
-
-      if WEBHOOK_ACTIVOS_URL:
-          if not message_id_activo:
-              # Crea el mensaje automáticamente si no existe ID guardado
-              res = requests.post(f"{WEBHOOK_ACTIVOS_URL}?wait=true", json={"embeds": [embed]}, timeout=5)
-              if res.status_code in [200, 201]:
-                  data_res = res.json()
-                  message_id_activo = data_res.get("id")
-          else:
-              # Edita el mensaje existente usando el ID que obtuvo automáticamente
-              url_patch = f"{WEBHOOK_ACTIVOS_URL}/messages/{message_id_activo}"
-              res = requests.patch(url_patch, json={"embeds": [embed]}, timeout=5)
-              if res.status_code == 404:
-                  # Si el mensaje fue borrado, lo vuelve a crear
-                  res_new = requests.post(f"{WEBHOOK_ACTIVOS_URL}?wait=true", json={"embeds": [embed]}, timeout=5)
-                  if res_new.status_code in [200, 201]:
-                      message_id_activo = res_new.json().get("id")
+      if WEBHOOK_ACTIVOS_URL and MESSAGE_ID_ACTIVOS:
+          embed = {
+              "title": "🟢 Panel de Monitoreo de Bots Activos",
+              "description": "Estado en tiempo real de las cuentas ejecutando el script.",
+              "color": 65280,
+              "fields": [{
+                  "name": f"Cuentas Online ({len(cuentas_activas)})",
+                  "value": texto_cuentas,
+                  "inline": False,
+              }],
+              "footer": {"text": f"Última actualización: {tiempo_actual}"},
+          }
+          url_patch = f"{WEBHOOK_ACTIVOS_URL}/messages/{MESSAGE_ID_ACTIVOS}"
+          requests.patch(url_patch, json={"embeds": [embed]}, timeout=5)
 
     except Exception as e:
       print(f"Error en bucle panel: {e}")
-
-    time.sleep(10)
 
 
 # ==========================================
