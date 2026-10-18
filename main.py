@@ -16,6 +16,7 @@ load_dotenv()
 # ==========================================
 BANS_FILE = "bans.json"
 IP_BANS_FILE = "ip_bans.json"
+HWID_BANS_FILE = "hwid_bans.json"
 HISTORIAL_FILE = "registros_usuarios.json"
 
 def cargar_json(archivo):
@@ -36,6 +37,7 @@ def guardar_json(archivo, datos):
 
 usuarios_baneados = cargar_json(BANS_FILE)
 ips_baneadas = cargar_json(IP_BANS_FILE)
+hwids_baneadas = cargar_json(HWID_BANS_FILE)
 historial_usuarios = cargar_json(HISTORIAL_FILE)
 
 # ==========================================
@@ -44,7 +46,7 @@ historial_usuarios = cargar_json(HISTORIAL_FILE)
 WEBHOOK_ACTIVOS_URL = os.getenv("WEBHOOK_ACTIVOS_URL", "")
 MESSAGE_ID_ACTIVOS = os.getenv("MESSAGE_ID_ACTIVOS", "")
 CANAL_BANEOS_ID = 1561319331063791796  # Canal de comandos de baneo
-CANAL_HWID_LOGS = 1561327111581466666   # Nuevo canal donde se enviarán las HWIDs e IPs
+CANAL_HWID_LOGS = 1561327111581466666   # Canal donde se enviarán las HWIDs e IPs
 
 # ==========================================
 # 1. SERVIDOR WEB (FLASK) Y PANEL DE ACTIVOS
@@ -79,7 +81,7 @@ def heartbeat():
   data = request.json
   if data and "username" in data:
     username = data["username"].strip().lower()
-    hwid = data.get("hwid", "Desconocido")
+    hwid = data.get("hwid", "Desconocido").strip()
     executor = data.get("executor", "Desconocido")
     
     # Obtener IP real
@@ -87,12 +89,14 @@ def heartbeat():
     if "," in ip_usuario:
         ip_usuario = ip_usuario.split(",")[0].strip()
 
-    # Verificar si el usuario o la IP están baneados
+    # Verificar si el usuario, la IP o la HWID están baneados
     razon_ban = None
     if username in usuarios_baneados:
         razon_ban = usuarios_baneados[username]
     elif ip_usuario in ips_baneadas:
         razon_ban = ips_baneadas[ip_usuario]
+    elif hwid in hwids_baneadas:
+        razon_ban = hwids_baneadas[hwid]
 
     if razon_ban:
         return jsonify({"status": "banned", "reason": razon_ban}), 403
@@ -114,7 +118,7 @@ def run_flask():
 
 
 # ==========================================
-# TAREA EN SEGUNDO PLANO: PANEL DE ACTIVOS Y LOGS HWID (ANTI-SPAM)
+# TAREA EN SEGUNDO PLANO: PANEL DE ACTIVOS Y LOGS HWID (ANTI-SPAM ESTRICTO)
 # ==========================================
 def bucle_actualizar_panel():
   global bot
@@ -142,30 +146,38 @@ def bucle_actualizar_panel():
         
         lineas_cuentas.append(f"• `{usr}` | IP: `{ip_actual}` | HWID: `{hwid_actual}` {fuego}(Activo)")
 
-        # Lógica Anti-Spam: Verificar si el usuario ya tiene registro o si cambió de IP/HWID
-        registrar_cambio = False
+        # Lógica Anti-Spam Estricta: Solo notifica UNA VEZ si es completamente nuevo, 
+        # o si cambia estrictamente de HWID o introduce una IP totalmente nueva respecto a lo guardado.
+        enviar_alerta = False
+        cambio_detectado = False
+
         if usr not in historial_usuarios:
             historial_usuarios[usr] = {
                 "hwid": hwid_actual,
                 "ips": [ip_actual],
                 "executor": exec_actual
             }
-            registrar_cambio = True
+            enviar_alerta = True
+            cambio_detectado = True
         else:
             datos_guardados = historial_usuarios[usr]
             
             if datos_guardados.get("hwid") != hwid_actual:
                 datos_guardados["hwid"] = hwid_actual
-                registrar_cambio = True
+                enviar_alerta = True
+                cambio_detectado = True
                 
             if ip_actual not in datos_guardados.get("ips", []):
                 datos_guardados["ips"].append(ip_actual)
-                registrar_cambio = True
+                enviar_alerta = True
+                cambio_detectado = True
                 
             datos_guardados["executor"] = exec_actual
 
-        if registrar_cambio:
+        if cambio_detectado:
             guardar_json(HISTORIAL_FILE, historial_usuarios)
+
+        if enviar_alerta:
             if canal_logs:
                 ips_str = ", ".join(historial_usuarios[usr]["ips"])
                 bot.loop.create_task(canal_logs.send(
@@ -311,19 +323,47 @@ async def ipunban(ctx, ip: str):
 
 
 @bot.command()
+async def hwidban(ctx, hwid: str, *, razon: str = "HWID bloqueada por seguridad"):
+    if ctx.channel.id != CANAL_BANEOS_ID:
+        return
+    hwid_clean = hwid.strip()
+    hwids_baneadas[hwid_clean] = razon
+    guardar_json(HWID_BANS_FILE, hwids_baneadas)
+    
+    embed = discord.Embed(title="🛡️ HWID BANEADA", description=f"La HWID `{hwid_clean}` ha sido bloqueada permanentemente.", color=discord.Color.red())
+    embed.add_field(name="Razón", value=razon, inline=False)
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def hwidunban(ctx, hwid: str):
+    if ctx.channel.id != CANAL_BANEOS_ID:
+        return
+    hwid_clean = hwid.strip()
+    if hwid_clean in hwids_baneadas:
+        hwids_baneadas.pop(hwid_clean)
+        guardar_json(HWID_BANS_FILE, hwids_baneadas)
+        await ctx.send(f"✅ La HWID `{hwid_clean}` ha sido desbaneada.")
+    else:
+        await ctx.send(f"⚠️ La HWID no estaba en la lista de baneos.")
+
+
+@bot.command()
 async def banlist(ctx):
     if ctx.channel.id != CANAL_BANEOS_ID:
         return
-    if not usuarios_baneados and not ips_baneadas:
+    if not usuarios_baneados and not ips_baneadas and not hwids_baneadas:
         await ctx.send("📋 Las listas de baneos están vacías.")
         return
 
-    embed = discord.Embed(title="📋 Lista de Baneos (Usuarios e IPs)", color=discord.Color.orange())
+    embed = discord.Embed(title="📋 Lista de Baneos (Usuarios, IPs y HWIDs)", color=discord.Color.orange())
     desc = ""
     for usr, r in usuarios_baneados.items():
         desc += f"• **Usuario:** `{usr}` | Razón: {r}\n"
     for ip, r in ips_baneadas.items():
         desc += f"• **IP:** `{ip}` | Razón: {r}\n"
+    for h, r in hwids_baneadas.items():
+        desc += f"• **HWID:** `{h}` | Razón: {r}\n"
 
     embed.description = desc[:1990]
     await ctx.send(embed=embed)
